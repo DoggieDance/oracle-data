@@ -229,7 +229,7 @@ function encodeSeries(arr) { // Uint32Array aligned to dates → [start, ...cent
   while (a <= b && !arr[a]) a++; while (b >= a && !arr[b]) b--;
   return a > b ? null : [a, ...arr.subarray(a, b + 1)];
 }
-function writeLatest(rows, date) {
+function writeLatest(rows, date, trend) {
   fs.mkdirSync(path.join(OUT, 'latest'), { recursive: true });
   const L = Array.from({ length: LATEST_SHARDS }, () => ({}));
   for (const [pid, sub, ...v] of rows) {
@@ -240,7 +240,15 @@ function writeLatest(rows, date) {
     while (row.length < off + 4) row.push(0);
     for (let i = 0; i < 4; i++) row[off + i] = +v[i] || 0;
   }
-  L.forEach((sh, i) => fs.writeFileSync(path.join(OUT, 'latest', i + '.json'), JSON.stringify({ d: date, p: sh })));
+  // t: {pid: [normal m30, normal usual, foil m30, foil usual]} — see Movers.add
+  const T = Array.from({ length: LATEST_SHARDS }, () => ({}));
+  if (trend) for (const [k, v] of trend) {
+    const pid = Math.floor(k / 2), off = k % 2 ? 2 : 0, sh = T[pid % LATEST_SHARDS];
+    const row = sh[pid] || (sh[pid] = [0, 0]);
+    while (row.length < off + 2) row.push(0);
+    row[off] = v[0]; row[off + 1] = v[1];
+  }
+  L.forEach((sh, i) => fs.writeFileSync(path.join(OUT, 'latest', i + '.json'), JSON.stringify({ d: date, p: sh, t: T[i] })));
 }
 function writeSite(meta) {
   fs.writeFileSync(path.join(OUT, 'meta.json'), JSON.stringify(meta));
@@ -257,7 +265,7 @@ function writeSite(meta) {
 //   - the price must also be off its days 31–365 median (a spike falling back isn't a drop)
 const SEALED_RE = /\b(booster|boosters|box|bundle|pack|packs|display|case|kit|prerelease|starter|gift|tin|fat pack|precon|commander deck|theme deck|intro deck|planeswalker deck|challenger deck|event deck|deck box|sealed|collection|anthology|from the vault|signature spellbook|duel decks?|secret lair drop|land station)\b/i;
 class Movers {
-  constructor(dates, lows) { this.dates = dates; this.lows = lows || new Map(); this.t = dates.map(d => Date.parse(d)); this.list = []; const last = this.t[this.t.length - 1]; this.from = last - 30 * 864e5; this.to = last - 7 * 864e5; this.recent = last - 4 * 864e5; this.longFrom = last - 365 * 864e5; this.lastIdx = dates.length - 1; }
+  constructor(dates, lows) { this.dates = dates; this.lows = lows || new Map(); this.t = dates.map(d => Date.parse(d)); this.list = []; const last = this.t[this.t.length - 1]; this.from = last - 30 * 864e5; this.to = last - 7 * 864e5; this.recent = last - 4 * 864e5; this.longFrom = last - 365 * 864e5; this.lastIdx = dates.length - 1; this.trend = new Map(); }
   add(pid, foil, arr) {
     const cur = arr[this.lastIdx]; if (!cur) return;
     const ref = [], win = [], rec = [];
@@ -267,6 +275,15 @@ class Movers {
       if (this.t[i] <= this.to) ref.push(v);
       else if (this.t[i] >= this.recent && rec.length < 3) rec.push(v);
     }
+    // Per-printing trend for the latest shards (deck checks in ORACLE): median of days 8–30, and the
+    // weekly-sampled median of days 31–365 (its "usual" price).
+    const long = [];
+    for (let i = this.lastIdx, next = this.from; i >= 0 && this.t[i] >= this.longFrom; i--) if (this.t[i] <= next && arr[i]) { long.push(arr[i]); next = this.t[i] - 6.5 * 864e5; }
+    long.sort((x, y) => x - y);
+    const lmed = long.length >= 4 ? long[long.length >> 1] : 0;
+    const rs = [...ref].sort((x, y) => x - y);
+    const m30 = rs.length >= 4 ? rs[rs.length >> 1] : 0;
+    if (m30 || lmed) this.trend.set(keyOf(pid, foil), [m30, lmed]);
     if (ref.length < 8 || rec.length < 3) return;
     ref.sort((x, y) => x - y);
     const med = ref[ref.length >> 1];
@@ -279,17 +296,17 @@ class Movers {
     const sd = Math.sqrt(win.reduce((x, y) => x + (y - mean) ** 2, 0) / win.length);
     if (Math.abs(now - med) < Math.max(50, sd)) return;
     // A spike unwinding (or a dip recovering) isn't a move: the price must also differ from its longer-run level.
-    const long = [];
-    // weekly samples, so the daily-resolution last 90 days don't outweigh the weekly year before them
-    for (let i = this.lastIdx, next = this.from; i >= 0 && this.t[i] >= this.longFrom; i--) if (this.t[i] <= next && arr[i]) { long.push(arr[i]); next = this.t[i] - 6.5 * 864e5; }
-    if (long.length >= 4) {
-      long.sort((x, y) => x - y);
-      const lmed = long[long.length >> 1];
-      if (pct < 0 ? now > lmed * 0.9 : now < lmed * 1.1) return;
-    }
+    // (weekly samples, so the daily-resolution last 90 days don't outweigh the weekly year before them)
+    if (lmed && (pct < 0 ? now > lmed * 0.9 : now < lmed * 1.1)) return;
     const low = this.lows.get(pid * 2 + (foil ? 1 : 0));
     if (low && (pct < 0 ? low > med : low < med)) return;
-    this.list.push({ pid, foil, cur: now, ref: med, pct });
+    // Was it already moving before this week? Compare the late half of the reference window
+    // (days 8–15) with the early half (days 22–30): a steady trend vs a one-week spike/crash.
+    let g = 0;
+    const early = [], late = [];
+    for (let i = this.lastIdx; i >= 0 && this.t[i] >= this.from; i--) if (arr[i]) { const age = (this.t[this.lastIdx] - this.t[i]) / 864e5; if (age >= 22) early.push(arr[i]); else if (age >= 8 && age <= 15) late.push(arr[i]); }
+    if (early.length >= 3 && late.length >= 3) { const md = a => a.sort((x, y) => x - y)[a.length >> 1]; const r = md(late) / md(early) - 1; if (pct > 0 ? r >= 0.08 : r <= -0.08) g = 1; }
+    this.list.push({ pid, foil, cur: now, ref: med, pct, g });
   }
   write(prod) {
     const named = this.list.map(m => {
@@ -298,7 +315,7 @@ class Movers {
       // Old sets have no collector numbers on TCGplayer, so sealed is decided by the product name.
       const kind = p[2] || !SEALED_RE.test(p[0]) ? 'single' : 'sealed';
       if (kind === 'sealed' && Math.max(m.cur, m.ref) < 1500) return null;
-      return { pid: m.pid, n: p[0], set: g.abbr || '', sn: g.name || '', num: p[2] || '', kind, foil: m.foil ? 1 : 0, cur: m.cur, ref: m.ref, pct: Math.round(m.pct * 1000) / 1000 };
+      return { pid: m.pid, n: p[0], set: g.abbr || '', sn: g.name || '', num: p[2] || '', kind, foil: m.foil ? 1 : 0, cur: m.cur, ref: m.ref, pct: Math.round(m.pct * 1000) / 1000, g: m.g };
     }).filter(Boolean);
     const pick = (kind, dir) => named.filter(m => m.kind === kind && (dir < 0 ? m.pct < 0 : m.pct > 0)).sort((a, b) => dir < 0 ? a.pct - b.pct : b.pct - a.pct).slice(0, 40);
     const out = { d: this.dates[this.lastIdx], window: '7d vs median of days 8–30', drops: { single: pick('single', -1), sealed: pick('sealed', -1) }, climbs: { single: pick('single', 1), sealed: pick('sealed', 1) } };
@@ -334,7 +351,6 @@ function build() {
   fs.rmSync(path.join(OUT, 'hist'), { recursive: true, force: true });
   fs.rmSync(path.join(OUT, 'latest'), { recursive: true, force: true });
   fs.mkdirSync(path.join(OUT, 'hist'), { recursive: true });
-  writeLatest(readDay(latest), latest);
   const H = Array.from({ length: HIST_SHARDS }, () => ({}));
   const movers = new Movers(dates, lowsOf(readDay(latest)));
   for (const [k, a] of series) {
@@ -345,6 +361,7 @@ function build() {
   }
   let bytes = 0;
   H.forEach((sh, i) => { const t = JSON.stringify(sh); bytes += t.length; fs.writeFileSync(path.join(OUT, 'hist', i + '.json'), t); });
+  writeLatest(readDay(latest), latest, movers.trend);
   movers.write(prod);
   writeSite(metaFor(dates, d => files[d][0].src, series.size, latest));
   log(`build: ${series.size} series, history ${(bytes / 1e6).toFixed(1)} MB in ${HIST_SHARDS} shards`);
@@ -397,7 +414,7 @@ function update(date) {
     }
     fs.writeFileSync(file, JSON.stringify(out));
   }
-  writeLatest(rows, date);
+  writeLatest(rows, date, movers.trend);
   movers.write(readProducts());
   writeSite(metaFor(dates, d => srcByDate[d] || 't', n, date));
   log(`update: ${oldDates.length} → ${dates.length} points, now through ${date}; ${n} series`);
@@ -415,6 +432,8 @@ try {
     let have = null; try { have = JSON.parse(fs.readFileSync(path.join(OUT, 'meta.json'), 'utf8')).latest; } catch {}
     const d = await daily({ latestHave: have, force: process.argv.includes('--force') });
     if (d) update(d);
+    // Reprint radar refreshes every run (Scryfall adds spoiled reprints daily). A failure keeps yesterday's file.
+    try { await (await import('./reprints.mjs')).buildReprints(PUB); } catch (e) { log('reprints failed (keeping the last file): ' + e.message); }
   }
   else if (cmd === 'all') { await daily(); build(); }
   else console.log('usage: node sync.mjs backfill|daily|build|update [date]|action|all');

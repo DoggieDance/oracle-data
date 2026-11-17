@@ -42,3 +42,14 @@ node feeds.mjs public       # rebuild the wire
 ```
 
 TCGCSV etiquette is followed: one sync a day, a custom User-Agent, 120 ms between requests, archives fetched once. Prices are TCGplayer data, shown for personal deck-building.
+
+## Reprint radar (`reprints.mjs`)
+
+Runs at the end of every daily `action`. Streams Scryfall's `default_cards` bulk file (gzipped JSON Lines, ~80 MB, one request)
+and writes `public/reprints.json`: every card reprinted in the last 75 days or announced for an upcoming product, with the
+cheapest / dearest price of its EXISTING printings. Promo-type sets are skipped. ORACLE uses it for the Reprints view,
+the "Your decks" wait/buy list, the Shop chips and the card-detail note. A failure keeps the previous file.
+
+The latest shards also carry `t: {pid: [normal m30, normal usual, foil m30, foil usual]}` — the median of days 8–30 and the
+weekly-sampled median of days 31–365 — so ORACLE can read a whole deck's buy/wait state from the small shards.
+Movers carry `g: 1` when the move was already under way before this week (steady), `0` for a one-week spike/crash.
