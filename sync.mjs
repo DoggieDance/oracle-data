@@ -84,9 +84,11 @@ export function backfillDates(today = iso(new Date())) {
 async function backfill() {
   const z = sevenZip();
   const dates = backfillDates().filter(d => !haveDay(d));
+  if (process.env.BACKFILL_REVERSE) dates.reverse(); // a second worker can start from the newest end
   log(`backfill: ${dates.length} archive day(s) to fetch`);
   let n = 0;
   for (const d of dates) {
+    if (haveDay(d)) continue; // another worker got here first
     const file = path.join(ARCH, `prices-${d}.ppmd.7z`);
     if (!fs.existsSync(file)) {
       const buf = await get(`${BASE}/archive/tcgplayer/prices-${d}.ppmd.7z`, { binary: true });
