@@ -44,10 +44,20 @@ const iso = d => d.toISOString().slice(0, 10);
 const addDays = (s, n) => { const d = new Date(s + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return iso(d); };
 
 async function get(url, { binary = false, tries = 4 } = {}) {
+  let throttles = 0;
   for (let i = 1; i <= tries; i++) {
     const r = await fetch(url, { headers: { 'user-agent': UA } }).catch(e => ({ ok: false, status: 0, err: e }));
     if (r.ok) return binary ? Buffer.from(await r.arrayBuffer()) : r.json();
     if (r.status === 404 || r.status === 403) return null;
+    // TCGCSV throttles an IP for ~10 min when it's asked too fast: wait it out, don't hammer.
+    if (r.status === 429 && throttles < 6) {
+      throttles++; i--;
+      const ra = +(r.headers && r.headers.get && r.headers.get('retry-after')) || 0;
+      const wait = Math.max(ra * 1000, 10.5 * 60 * 1000);
+      log(`  throttled (429) — pausing ${Math.round(wait / 60000)} min before retrying`);
+      await sleep(wait);
+      continue;
+    }
     if (i < tries) await sleep(i * 3000); else throw new Error(`GET ${url} → ${r.status || r.err}`);
   }
 }
@@ -81,38 +91,61 @@ export function backfillDates(today = iso(new Date())) {
   for (let d = ARCHIVE_START; d < today; d = addDays(d, 1)) out.push(d);
   return out;
 }
+// Several workers can run at once: each claims a day with an exclusive lock file before
+// touching it (a dead worker's claims are released), so no day is fetched twice.
+//   BACKFILL_FROM=YYYY-MM-DD   start here (default: archive start / newest when reversed)
+//   BACKFILL_REVERSE=1         walk toward older days
+const LOCKS = path.join(ROOT, 'cache', 'locks');
+function claim(d) {
+  fs.mkdirSync(LOCKS, { recursive: true });
+  const f = path.join(LOCKS, d);
+  try { fs.writeFileSync(f, String(process.pid), { flag: 'wx' }); return true; }
+  catch {
+    const pid = +fs.readFileSync(f, 'utf8');
+    try { process.kill(pid, 0); return false; } // owner still alive
+    catch { fs.writeFileSync(f, String(process.pid)); return true; } // stale: take it over
+  }
+}
+const release = d => fs.rmSync(path.join(LOCKS, d), { force: true });
 async function backfill() {
   const z = sevenZip();
-  const dates = backfillDates().filter(d => !haveDay(d));
-  if (process.env.BACKFILL_REVERSE) dates.reverse(); // a second worker can start from the newest end
-  log(`backfill: ${dates.length} archive day(s) to fetch`);
+  let dates = backfillDates().filter(d => !haveDay(d));
+  const from = process.env.BACKFILL_FROM;
+  if (process.env.BACKFILL_REVERSE) { dates.reverse(); if (from) dates = dates.filter(d => d <= from); }
+  else if (from) dates = dates.filter(d => d >= from);
+  log(`backfill worker ${process.pid}: ${dates.length} day(s) in range${from ? ' from ' + from : ''}${process.env.BACKFILL_REVERSE ? ' (newest first)' : ''}`);
   let n = 0;
   for (const d of dates) {
-    if (haveDay(d)) continue; // another worker got here first
-    const file = path.join(ARCH, `prices-${d}.ppmd.7z`);
-    if (!fs.existsSync(file)) {
-      const buf = await get(`${BASE}/archive/tcgplayer/prices-${d}.ppmd.7z`, { binary: true });
-      if (!buf) { log(`  ${d}: no archive`); continue; }
-      fs.writeFileSync(file, buf);
-      await sleep(1000); // be gentle: archives are a few MB each
-    }
-    const tmp = path.join(ROOT, 'cache', 'x-' + d);
-    fs.rmSync(tmp, { recursive: true, force: true });
-    execFileSync(z, ['x', '-y', '-o' + tmp, file, `${d}/${CAT}/*`, '-r'], { stdio: 'ignore' });
-    const catDir = path.join(tmp, d, String(CAT));
-    const lines = [];
-    if (fs.existsSync(catDir)) for (const g of fs.readdirSync(catDir)) {
-      const f = path.join(catDir, g, 'prices');
-      if (!fs.existsSync(f)) continue;
-      try { lines.push(...rowsToTsv(JSON.parse(fs.readFileSync(f, 'utf8')).results || [])); } catch {}
-    }
-    fs.rmSync(tmp, { recursive: true, force: true });
-    if (lines.length) { writeDay(d, lines); n++; log(`  ${d}: ${lines.length} prices`); }
-    // Keep the raw archive? They're immutable and TCGCSV asks not to re-download — the
-    // converted day file is our permanent record, so the raw 7z can go.
-    fs.rmSync(file, { force: true });
+    if (haveDay(d) || !claim(d)) continue;
+    try {
+      const file = path.join(ARCH, `prices-${d}.ppmd.7z`);
+      if (!fs.existsSync(file)) {
+        const buf = await get(`${BASE}/archive/tcgplayer/prices-${d}.ppmd.7z`, { binary: true });
+        if (!buf) { log(`  ${d}: no archive`); continue; }
+        fs.writeFileSync(file + '.part', buf); fs.renameSync(file + '.part', file); // never leave a half archive
+        await sleep(1000); // be gentle: archives are a few MB each
+      }
+      const tmp = path.join(ROOT, 'cache', 'x-' + d);
+      fs.rmSync(tmp, { recursive: true, force: true });
+      execFileSync(z, ['x', '-y', '-o' + tmp, file, `${d}/${CAT}/*`, '-r'], { stdio: 'ignore' });
+      const catDir = path.join(tmp, d, String(CAT));
+      const lines = [];
+      if (fs.existsSync(catDir)) for (const g of fs.readdirSync(catDir)) {
+        const f = path.join(catDir, g, 'prices');
+        if (!fs.existsSync(f)) continue;
+        try { lines.push(...rowsToTsv(JSON.parse(fs.readFileSync(f, 'utf8')).results || [])); } catch {}
+      }
+      fs.rmSync(tmp, { recursive: true, force: true });
+      if (lines.length) {
+        const out = path.join(DAYS, d + '.tsv.gz');
+        fs.writeFileSync(out + '.part', zlib.gzipSync(lines.join('\n') + '\n', { level: 9 })); fs.renameSync(out + '.part', out);
+        n++; log(`  ${d}: ${lines.length} prices`);
+      }
+      // The converted day file is our permanent record (backed up to Releases); the raw 7z can go.
+      fs.rmSync(file, { force: true });
+    } finally { release(d); }
   }
-  log(`backfill done: ${n} day(s) added`);
+  log(`backfill worker ${process.pid} done: ${n} day(s) added`);
 }
 
 // ---------- daily from live API ----------
@@ -221,9 +254,10 @@ function writeSite(meta) {
 //   - the card must trade steadily (≥ 8 points in the reference window)
 //   - today's cheapest LISTING must agree with the direction (a real drop has listings below the old price)
 //   - moves beyond ±75% in a week are treated as bad data
+//   - the price must also be off its days 31–365 median (a spike falling back isn't a drop)
 const SEALED_RE = /\b(booster|boosters|box|bundle|pack|packs|display|case|kit|prerelease|starter|gift|tin|fat pack|precon|commander deck|theme deck|intro deck|planeswalker deck|challenger deck|event deck|deck box|sealed|collection|anthology|from the vault|signature spellbook|duel decks?|secret lair drop|land station)\b/i;
 class Movers {
-  constructor(dates, lows) { this.dates = dates; this.lows = lows || new Map(); this.t = dates.map(d => Date.parse(d)); this.list = []; const last = this.t[this.t.length - 1]; this.from = last - 30 * 864e5; this.to = last - 7 * 864e5; this.recent = last - 4 * 864e5; this.lastIdx = dates.length - 1; }
+  constructor(dates, lows) { this.dates = dates; this.lows = lows || new Map(); this.t = dates.map(d => Date.parse(d)); this.list = []; const last = this.t[this.t.length - 1]; this.from = last - 30 * 864e5; this.to = last - 7 * 864e5; this.recent = last - 4 * 864e5; this.longFrom = last - 365 * 864e5; this.lastIdx = dates.length - 1; }
   add(pid, foil, arr) {
     const cur = arr[this.lastIdx]; if (!cur) return;
     const ref = [], win = [], rec = [];
@@ -244,6 +278,15 @@ class Movers {
     const mean = win.reduce((x, y) => x + y, 0) / win.length;
     const sd = Math.sqrt(win.reduce((x, y) => x + (y - mean) ** 2, 0) / win.length);
     if (Math.abs(now - med) < Math.max(50, sd)) return;
+    // A spike unwinding (or a dip recovering) isn't a move: the price must also differ from its longer-run level.
+    const long = [];
+    // weekly samples, so the daily-resolution last 90 days don't outweigh the weekly year before them
+    for (let i = this.lastIdx, next = this.from; i >= 0 && this.t[i] >= this.longFrom; i--) if (this.t[i] <= next && arr[i]) { long.push(arr[i]); next = this.t[i] - 6.5 * 864e5; }
+    if (long.length >= 4) {
+      long.sort((x, y) => x - y);
+      const lmed = long[long.length >> 1];
+      if (pct < 0 ? now > lmed * 0.9 : now < lmed * 1.1) return;
+    }
     const low = this.lows.get(pid * 2 + (foil ? 1 : 0));
     if (low && (pct < 0 ? low > med : low < med)) return;
     this.list.push({ pid, foil, cur: now, ref: med, pct });
