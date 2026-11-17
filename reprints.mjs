@@ -7,14 +7,11 @@
 //   lo/hi = cheapest / dearest existing printing in USD cents (non-foil, else foil).
 import fs from 'node:fs';
 import path from 'node:path';
-import { Readable } from 'node:stream';
-import zlib from 'node:zlib';
-import readline from 'node:readline';
+import { bulkCards } from './scryfall-bulk.mjs';
 
 const PUB = process.argv[2] || process.env.PUBLIC_DIR || 'public';
 const RECENT_DAYS = 75;      // reprints released this recently still count (prices bottom 2–4 months after release)
 const MIN_CENTS = 100;       // ignore cards whose cheapest existing copy is under $1
-const UA = { 'User-Agent': 'ORACLE-data/1.0 (personal deck builder)', Accept: 'application/json;q=0.9,*/*;q=0.8' };
 // Supply that actually reaches the market. Promos / memorabilia / digital don't move prices.
 const SKIP_SET_TYPES = new Set(['promo', 'memorabilia', 'token', 'minigame', 'alchemy', 'treasure_chest', 'vanguard', 'funny']);
 
@@ -22,36 +19,20 @@ const log = (...a) => console.log(`[${new Date().toISOString().slice(0, 19).repl
 const cents = v => v ? Math.round(parseFloat(v) * 100) : 0;
 const addDays = (d, n) => new Date(Date.parse(d + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
 
-export async function buildReprints(pub = PUB, source) {
+export async function buildReprints(pub = PUB) {
   const today = new Date().toISOString().slice(0, 10);
   const recentFrom = addDays(today, -RECENT_DAYS);
-  let input = source;
-  if (!input) {
-    const meta = await (await fetch('https://api.scryfall.com/bulk-data/default-cards', { headers: UA })).json();
-    const uri = meta.jsonl_download_uri; // gzipped JSON Lines (one printing per line)
-    if (!uri) throw new Error('bulk-data: no jsonl_download_uri in ' + JSON.stringify(meta).slice(0, 300));
-    log(`reprints: downloading ${uri} (${((meta.compressed_size || 0) / 1e6).toFixed(0)} MB gz, ${meta.updated_at})`);
-    const res = await fetch(uri, { headers: UA });
-    if (!res.ok) throw new Error('bulk download ' + res.status);
-    input = Readable.fromWeb(res.body);
-  } else input = fs.createReadStream(source);
-  if (!source || source.endsWith('.gz')) input = input.pipe(zlib.createGunzip());
-
   const byOracle = new Map(); // oracle_id → { n, prints: [...] }
   let seen = 0;
-  for await (const line of readline.createInterface({ input, crlfDelay: Infinity })) {
-    if (!line || line[0] !== '{') continue;
-    const c = JSON.parse(line);
-    (() => {
-        seen++;
-        if (c.digital || !(c.games || []).includes('paper')) return;
-        if (/^(token|double_faced_token|art_series|emblem|vanguard|planar|scheme)$/.test(c.layout)) return;
-        if (/\bBasic\b/.test(c.type_line || '')) return;
-        const o = c.oracle_id || (c.card_faces && c.card_faces[0] && c.card_faces[0].oracle_id); if (!o) return;
-        let e = byOracle.get(o); if (!e) byOracle.set(o, e = { n: c.name, prints: [] });
-        e.prints.push({ id: c.id, set: c.set, sn: c.set_name, st: c.set_type, rel: c.released_at, reprint: !!c.reprint,
-          usd: cents(c.prices && c.prices.usd), foil: cents(c.prices && (c.prices.usd_foil || c.prices.usd_etched)) });
-    })();
+  for await (const c of bulkCards()) {
+    seen++;
+    if (c.digital || !(c.games || []).includes('paper')) continue;
+    if (/^(token|double_faced_token|art_series|emblem|vanguard|planar|scheme)$/.test(c.layout)) continue;
+    if (/\bBasic\b/.test(c.type_line || '')) continue;
+    const o = c.oracle_id || (c.card_faces && c.card_faces[0] && c.card_faces[0].oracle_id); if (!o) continue;
+    let e = byOracle.get(o); if (!e) byOracle.set(o, e = { n: c.name, prints: [] });
+    e.prints.push({ id: c.id, set: c.set, sn: c.set_name, st: c.set_type, rel: c.released_at, reprint: !!c.reprint,
+      usd: cents(c.prices && c.prices.usd), foil: cents(c.prices && (c.prices.usd_foil || c.prices.usd_etched)) });
   }
 
   const cards = [];
@@ -82,5 +63,5 @@ export async function buildReprints(pub = PUB, source) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  buildReprints(PUB, process.env.BULK_FILE).catch(e => { console.error(e); process.exit(1); });
+  buildReprints(PUB).catch(e => { console.error(e); process.exit(1); });
 }

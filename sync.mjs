@@ -437,6 +437,8 @@ try {
     if (d) update(d);
     // Reprint radar refreshes every run (Scryfall adds spoiled reprints daily). A failure keeps yesterday's file.
     try { await (await import('./reprints.mjs')).buildReprints(PUB); } catch (e) { log('reprints failed (keeping the last file): ' + e.message); }
+    // Market read (staples index, staples on sale, new-set curve; images on movers). Needs reprints.json first.
+    try { await (await import('./market.mjs')).buildMarket(); } catch (e) { log('market failed (keeping the last file): ' + e.message); }
   }
   else if (cmd === 'all') { await daily(); build(); }
   else console.log('usage: node sync.mjs backfill|daily|build|update [date]|action|all');
