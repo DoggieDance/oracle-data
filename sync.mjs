@@ -268,6 +268,9 @@ class Movers {
   constructor(dates, lows) { this.dates = dates; this.lows = lows || new Map(); this.t = dates.map(d => Date.parse(d)); this.list = []; const last = this.t[this.t.length - 1]; this.from = last - 30 * 864e5; this.to = last - 7 * 864e5; this.recent = last - 4 * 864e5; this.longFrom = last - 365 * 864e5; this.lastIdx = dates.length - 1; this.trend = new Map(); }
   add(pid, foil, arr) {
     const cur = arr[this.lastIdx]; if (!cur) return;
+    // Cards on the market under ~60 days are still in preorder/launch pricing: no trend, no mover.
+    let firstIdx = 0; while (firstIdx < this.lastIdx && !arr[firstIdx]) firstIdx++;
+    if (this.t[firstIdx] > this.t[this.lastIdx] - 60 * 864e5) return;
     const ref = [], win = [], rec = [];
     for (let i = this.lastIdx; i >= 0 && this.t[i] >= this.from; i--) {
       const v = arr[i]; if (!v) continue;
