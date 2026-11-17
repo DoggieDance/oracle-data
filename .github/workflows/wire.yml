@@ -1,0 +1,39 @@
+name: News wire
+
+on:
+  schedule:
+    - cron: '41 */3 * * *'   # every three hours
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: publish-data
+  cancel-in-progress: false
+
+jobs:
+  wire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Load published data
+        run: scripts/fetch-site.sh
+      - name: Build the wire from MTG news feeds
+        run: node feeds.mjs public
+      - name: Publish
+        run: scripts/publish-site.sh "Wire $(date -u +%Y-%m-%dT%H:%MZ)"
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: public }
+      - id: deployment
+        uses: actions/deploy-pages@v4

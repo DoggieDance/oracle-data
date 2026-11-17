@@ -1,0 +1,55 @@
+name: Daily prices
+
+# TCGCSV rebuilds around 20:00 UTC. Run once a day a few hours later, off the top of the hour.
+on:
+  schedule:
+    - cron: '17 23 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Re-fetch even if TCGCSV has not updated'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: publish-data        # shared with the wire workflow: one writer at a time
+  cancel-in-progress: false
+
+jobs:
+  prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Load published data
+        run: scripts/fetch-site.sh
+      - name: Fetch today's TCGplayer prices and update history
+        run: node sync.mjs action ${{ inputs.force && '--force' || '' }}
+      - name: Archive the raw day (Release asset — kept forever, outside git)
+        run: |
+          shopt -s nullglob
+          for f in cache/days/*.tsv.gz; do
+            tag="days-$(basename "$f" | cut -c1-7)"
+            gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "Raw prices $(basename "$f" | cut -c1-7)" --notes "Daily TCGplayer prices (via tcgcsv.com), one gzipped TSV per day: pid, subtype, market, low, mid, directLow, high (cents)."
+            gh release upload "$tag" "$f" --clobber
+          done
+      - name: Publish
+        run: |
+          latest=$(node -p "require('./public/prices/meta.json').latest")
+          scripts/publish-site.sh "Prices through $latest"
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: public }
+      - id: deployment
+        uses: actions/deploy-pages@v4

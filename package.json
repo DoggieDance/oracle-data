@@ -1,0 +1,16 @@
+{
+  "name": "oracle-prices",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "7zip-bin": "^5.2.0",
+    "stream-json": "^1.9.1"
+  }
+}
