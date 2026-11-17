@@ -47,6 +47,7 @@ jobs:
           done
       - name: Publish
         run: |
+          if [ ! -f public/prices/meta.json ]; then echo "no price history published yet"; exit 0; fi
           latest=$(node -p "require('./public/prices/meta.json').latest")
           scripts/publish-site.sh "Prices through $latest"
       - uses: actions/upload-pages-artifact@v3

@@ -314,6 +314,7 @@ function metaFor(dates, srcOf, n, latest) {
 
 // ---------- INCREMENTAL update (GitHub Action: no day archive, just the published shards) ----------
 function update(date) {
+  if (!fs.existsSync(path.join(OUT, 'meta.json'))) { log('update: no published history yet — waiting for the initial upload from the backfill PC'); return false; }
   const meta = JSON.parse(fs.readFileSync(path.join(OUT, 'meta.json'), 'utf8'));
   if (meta.latest >= date) { log(`update: published data already at ${meta.latest}`); return false; }
   const oldDates = meta.dates, oldSrc = meta.src;
