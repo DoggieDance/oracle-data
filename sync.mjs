@@ -321,7 +321,10 @@ class Movers {
       return { pid: m.pid, n: p[0], set: g.abbr || '', sn: g.name || '', num: p[2] || '', kind, foil: m.foil ? 1 : 0, cur: m.cur, ref: m.ref, pct: Math.round(m.pct * 1000) / 1000, g: m.g };
     }).filter(Boolean);
     const pick = (kind, dir) => named.filter(m => m.kind === kind && (dir < 0 ? m.pct < 0 : m.pct > 0)).sort((a, b) => dir < 0 ? a.pct - b.pct : b.pct - a.pct).slice(0, 40);
-    const out = { d: this.dates[this.lastIdx], window: '7d vs median of days 8–30', drops: { single: pick('single', -1), sealed: pick('sealed', -1) }, climbs: { single: pick('single', 1), sealed: pick('sealed', 1) } };
+    // Same vetted pool ranked by DOLLARS moved instead of percent: a $400 card down 12% matters more to a buyer than a $3 card down 40%.
+    const pickUsd = (kind, dir) => named.filter(m => m.kind === kind && (dir < 0 ? m.pct < 0 : m.pct > 0)).sort((a, b) => dir < 0 ? (a.cur - a.ref) - (b.cur - b.ref) : (b.cur - b.ref) - (a.cur - a.ref)).slice(0, 40);
+    const out = { d: this.dates[this.lastIdx], window: '7d vs median of days 8–30', drops: { single: pick('single', -1), sealed: pick('sealed', -1) }, climbs: { single: pick('single', 1), sealed: pick('sealed', 1) },
+      dropsUsd: { single: pickUsd('single', -1), sealed: pickUsd('sealed', -1) }, climbsUsd: { single: pickUsd('single', 1), sealed: pickUsd('sealed', 1) } };
     fs.writeFileSync(path.join(OUT, 'movers.json'), JSON.stringify(out));
     log(`movers: ${out.drops.single.length}+${out.drops.sealed.length} drops, ${out.climbs.single.length}+${out.climbs.sealed.length} climbs`);
   }

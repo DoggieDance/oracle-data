@@ -153,7 +153,7 @@ export async function buildMarket() {
   const out = {
     d: today, updated: new Date().toISOString(),
     index: idx,
-    sale: sale.slice(0, 300), saleN: sale.length, heat: heat.slice(0, 60), heatN: heat.length,
+    sale: sale.slice(0, 300), saleN: sale.length, heat: heat.slice(0, 200), heatN: heat.length,
     curve: { pts: valid, bottom, sets: sets.length },
     recent: recent.map(s => ({ code: s.code, name: s.name, rel: s.rel, st: s.st, cards: s.cards, curve: s.curve })),
   };
@@ -162,7 +162,7 @@ export async function buildMarket() {
   // ---- 7. movers get images + EDHREC rank
   try {
     const mf = path.join(OUT, 'movers.json'), m = JSON.parse(fs.readFileSync(mf, 'utf8'));
-    for (const dir of ['drops', 'climbs']) for (const kind of ['single', 'sealed']) for (const it of (m[dir] || {})[kind] || []) {
+    for (const dir of ['drops', 'climbs', 'dropsUsd', 'climbsUsd']) for (const kind of ['single', 'sealed']) for (const it of (m[dir] || {})[kind] || []) {
       const inf = info.get(it.pid); if (!inf) continue;
       it.sid = inf.sid; const e = byOracle.get(inf.o); if (e && e.er) it.er = e.er;
     }
